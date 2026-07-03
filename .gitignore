@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+
+# PyCharm
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Pytest
+.pytest_cache/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+
+# System files
+.DS_Store
+Thumbs.db
