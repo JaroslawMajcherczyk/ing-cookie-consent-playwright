@@ -32,6 +32,23 @@ def get_cookies_by_name(page: Page) -> dict[str, dict]:
         for cookie in cookies
     }
 
+def fail_if_ing_blocked_environment(page: Page) -> None:
+    blocked_frame = page.locator(
+        'iframe[title*="Incapsula incident ID"]'
+    )
+
+    if blocked_frame.count() > 0:
+        incident_message = (
+            blocked_frame.first.get_attribute("title")
+            or "Brak numeru incydentu"
+        )
+
+        pytest.fail(
+            "Strona ING nie została załadowana. "
+            "Środowisko testowe zostało zablokowane przez "
+            "warstwę bezpieczeństwa Imperva/Incapsula. "
+            f"Komunikat: {incident_message}"
+        )
 
 @pytest.mark.smoke
 def test_analytics_cookie_consent_is_saved(page: Page) -> None:
@@ -43,6 +60,7 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
         wait_until="domcontentloaded",
         timeout=60_000,
     )
+    fail_if_ing_blocked_environment(page)
 
     cookie_preferences = CookiePreferences(page)
 

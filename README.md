@@ -530,7 +530,6 @@ W projekcie zastosowano następujące mechanizmy ograniczające niestabilność 
 - test nie zależy od stanu pozostawionego przez wcześniejsze uruchomienia.
 
 ---
-
 ## GitHub Actions — testy cross-browser
 
 Pipeline znajduje się w pliku:
@@ -542,8 +541,8 @@ Pipeline znajduje się w pliku:
 Workflow jest uruchamiany:
 
 - po wykonaniu `push` do gałęzi `main` lub `master`;
-- dla `pull_request` do gałęzi `main` lub `master`;
-- ręcznie przez opcję **Run workflow**.
+- po utworzeniu `pull_request` do gałęzi `main` lub `master`;
+- ręcznie przez opcję **Run workflow** w zakładce GitHub Actions.
 
 Najważniejszy fragment konfiguracji:
 
@@ -557,7 +556,7 @@ strategy:
       - webkit
 ```
 
-Dla każdej przeglądarki GitHub Actions tworzy osobny job:
+Macierz tworzy trzy niezależne joby:
 
 ```text
 Browser - chromium
@@ -565,48 +564,159 @@ Browser - firefox
 Browser - webkit
 ```
 
-Joby macierzy mogą być wykonywane równolegle. Ustawienie `fail-fast: false` powoduje, że błąd jednej przeglądarki nie anuluje pozostałych wariantów.
+Joby mogą być wykonywane równolegle. Ustawienie:
 
-Pipeline:
+```yaml
+fail-fast: false
+```
+
+powoduje, że niepowodzenie jednego wariantu nie anuluje pozostałych testów.
+
+Każdy job:
 
 1. pobiera kod repozytorium;
 2. ustawia Python 3.13;
 3. instaluje zależności z `requirements.txt`;
-4. instaluje wskazaną przeglądarkę wraz z bibliotekami systemowymi;
-5. uruchamia test z zapisem wyników do `test-results/<przeglądarka>`;
-6. publikuje katalog wynikowy jako artefakt danego joba.
+4. instaluje odpowiednią przeglądarkę i biblioteki systemowe;
+5. uruchamia test;
+6. generuje raport JUnit;
+7. publikuje katalog wynikowy jako artefakt GitHub Actions.
+
+### Ograniczenie runnerów GitHub Actions
+
+Podczas testu na standardowych runnerach GitHub-hosted serwis ING
+może zablokować żądanie przez warstwę bezpieczeństwa
+Imperva/Incapsula.
+
+W takim przypadku zamiast strony ING zwracany jest komunikat:
+
+```text
+Request unsuccessful. Incapsula incident ID: ...
+```
+
+Test nie może wtedy rozpocząć interakcji z panelem cookies, ponieważ
+właściwa strona nie została załadowana.
+
+Nie jest to błąd locatorów ani konfiguracji Playwright. Jest to
+ograniczenie dostępu do zewnętrznego serwisu z adresów IP używanych
+przez współdzielone runnery GitHub Actions.
+
+Pipeline potwierdza jednak poprawne działanie:
+
+- macierzy trzech przeglądarek;
+- instalacji Chromium, Firefox i WebKit;
+- niezależnego wykonywania jobów;
+- generowania raportów;
+- publikowania artefaktów diagnostycznych.
+
+Testy Chromium i Firefox zostały dodatkowo zweryfikowane lokalnie
+na systemie Manjaro.
+
+---
+
+## Lokalne testy cross-browser w Dockerze
+
+Pełny test Chromium, Firefox i WebKit można uruchomić lokalnie
+w oficjalnym kontenerze Playwright opartym na Ubuntu.
+
+Pozwala to ominąć problem bibliotek WebKit występujący lokalnie
+na niewspieranych dystrybucjach, takich jak Arch Linux lub Manjaro.
+
+Wersja obrazu Docker musi być zgodna z wersją biblioteki Playwright
+zapisaną w `requirements.txt`.
+
+Dla:
+
+```text
+playwright==1.61.0
+```
+
+należy użyć obrazu:
+
+```text
+mcr.microsoft.com/playwright/python:v1.61.0-noble
+```
+
+Uruchomienie trzech przeglądarek równolegle:
+
+```bash
+docker run --rm --pull=always --ipc=host \
+  -v "$PWD":/work \
+  -w /work \
+  mcr.microsoft.com/playwright/python:v1.61.0-noble \
+  bash -lc '
+    python -m pip install -r requirements.txt &&
+    python -m pytest tests/test_cookie_consent.py \
+      --browser chromium \
+      --browser firefox \
+      --browser webkit \
+      -n 3 \
+      -v
+  '
+```
+
+Znaczenie parametrów:
+
+- `--rm` — usuwa kontener po zakończeniu;
+- `--pull=always` — sprawdza i pobiera aktualny obraz wskazanej wersji;
+- `--ipc=host` — udostępnia przeglądarkom większą przestrzeń pamięci współdzielonej;
+- `-v "$PWD":/work` — udostępnia katalog projektu wewnątrz kontenera;
+- `-w /work` — ustawia katalog roboczy;
+- `-n 3` — uruchamia trzy procesy testowe przez `pytest-xdist`.
+
+Przy zmianie wersji Playwright w `requirements.txt` należy również
+zmienić wersję obrazu Docker.
+
+Przykład:
+
+```text
+playwright==1.62.0
+```
+
+wymaga obrazu:
+
+```text
+mcr.microsoft.com/playwright/python:v1.62.0-noble
+```
 
 ---
 
 ## Artefakty i diagnostyka
 
-### Co jest generowane
-
-| Materiał | Kiedy powstaje | Przykładowe położenie |
-|---|---|---|
-| `junit.xml` | przy każdym uruchomieniu zawierającym `--junitxml` | `test-results/chromium/junit.xml` |
-| `trace.zip` | po błędzie przy `--tracing=retain-on-failure` | wewnątrz `test-results/chromium/` |
-| screenshot | po błędzie przy `--screenshot=only-on-failure` | wewnątrz `test-results/chromium/` |
-
-Dokładna struktura podkatalogów tworzonych przez Playwright może zależeć od wersji pluginu i nazwy testu.
-
-### Wyniki lokalne
-
-Katalog `test-results/` pojawi się w katalogu głównym projektu dopiero po wykonaniu komendy z parametrami zapisującymi wyniki.
-
-W PyCharm może być konieczne odświeżenie panelu **Project**:
+Pipeline zapisuje wyniki osobno dla każdej przeglądarki:
 
 ```text
-prawy przycisk na katalogu projektu → Reload from Disk
+test-results/chromium/
+test-results/firefox/
+test-results/webkit/
 ```
 
-lub użycie skrótu właściwego dla używanej wersji PyCharm.
+Każdy job działa na osobnym runnerze, dlatego katalogi te nie znajdują
+się jednocześnie na jednej maszynie GitHub Actions.
 
-### Wyniki w GitHub Actions
+### Generowane materiały
 
-Każdy wariant macierzy działa na osobnym runnerze. Oznacza to, że katalogi Chromium, Firefox i WebKit nie istnieją jednocześnie na jednej maszynie CI.
+| Materiał | Kiedy powstaje |
+|---|---|
+| `junit.xml` | przy każdym uruchomieniu testu w pipeline |
+| `trace.zip` | po niepowodzeniu testu |
+| screenshot | po niepowodzeniu testu |
 
-Każdy job publikuje własny artefakt, na przykład:
+Raport JUnit zawiera między innymi:
+
+- nazwę testu;
+- liczbę uruchomionych testów;
+- liczbę błędów i niepowodzeń;
+- czas wykonania.
+
+Trace i screenshot są zachowywane dzięki parametrom:
+
+```text
+--tracing=retain-on-failure
+--screenshot=only-on-failure
+```
+
+Każdy job publikuje osobny artefakt:
 
 ```text
 playwright-results-chromium
@@ -614,18 +724,16 @@ playwright-results-firefox
 playwright-results-webkit
 ```
 
-Aby pobrać artefakty:
+Aby pobrać artefakt:
 
 1. otwórz repozytorium na GitHubie;
 2. przejdź do zakładki **Actions**;
-3. wybierz wykonanie workflow **Playwright E2E**;
-4. przewiń stronę do sekcji **Artifacts**;
-5. pobierz artefakt odpowiedniej przeglądarki.
+3. otwórz wykonanie workflow **Playwright E2E**;
+4. przejdź do sekcji **Artifacts**;
+5. pobierz wynik odpowiedniej przeglądarki.
 
-Artefakty nie są automatycznie dodawane do kodu repozytorium. Są przechowywane przy konkretnym wykonaniu workflow.
-
-
-
+Artefakty są przypisane do konkretnego wykonania workflow. Nie są
+automatycznie dodawane do plików repozytorium.
 
 ---
 
