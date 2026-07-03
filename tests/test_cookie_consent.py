@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
 import pytest
-from playwright.sync_api import Locator, Page, TimeoutError, expect
+from playwright.sync_api import (
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    expect,
+)
 
 from tests.pages.cookie_preferences import CookiePreferences
 
@@ -20,8 +26,17 @@ MARKETING_COOKIE_NAMES = {
     "cookieSEG__details",
 }
 
+INCAPSULA_MESSAGE_PATTERN = re.compile(
+    r"Request unsuccessful\.?\s*"
+    r"Incapsula incident ID:\s*"
+    r'[^"\n]+',
+    re.IGNORECASE,
+)
 
-def get_cookies_by_name(page: Page) -> dict[str, dict[str, Any]]:
+
+def get_cookies_by_name(
+    page: Page,
+) -> dict[str, dict[str, Any]]:
     """
     Pobiera cookies zapisane dla domeny ING.
 
@@ -36,85 +51,112 @@ def get_cookies_by_name(page: Page) -> dict[str, dict[str, Any]]:
     }
 
 
-def get_incapsula_frame(page: Page) -> Locator:
+def read_incapsula_message(page: Page) -> str | None:
     """
-    Zwraca locator komunikatu blokady Imperva/Incapsula.
+    Odczytuje drzewo dostępności strony i zwraca komunikat
+    Imperva/Incapsula, jeżeli został wyświetlony.
+
+    Komunikat blokady może być dostępny jako nazwa elementu iframe,
+    mimo że nie występuje bezpośrednio w atrybucie HTML title.
     """
-    return page.locator(
-        'iframe[title*="Request unsuccessful"], '
-        'iframe[title*="Incapsula incident ID"]'
-    ).first
+    try:
+        aria_snapshot = page.aria_snapshot(timeout=2_000)
+    except PlaywrightTimeoutError:
+        return None
+
+    match = INCAPSULA_MESSAGE_PATTERN.search(aria_snapshot)
+
+    if match is None:
+        return None
+
+    return match.group(0).strip()
 
 
-def fail_with_incapsula_message(blocked_frame: Locator) -> None:
+def fail_when_ing_is_blocked(message: str) -> None:
     """
-    Kończy test czytelnym komunikatem, gdy ING zablokował
-    środowisko testowe.
+    Kończy test czytelnym komunikatem, gdy środowisko
+    zostało zablokowane przez Imperva/Incapsula.
     """
-    incident_message = (
-        blocked_frame.get_attribute("title")
-        or "Request unsuccessful — brak numeru incydentu"
-    )
-
     pytest.fail(
         "Strona ING nie została załadowana. "
         "Środowisko testowe zostało zablokowane przez "
         "warstwę bezpieczeństwa Imperva/Incapsula. "
-        f"Komunikat: {incident_message}",
+        f"Komunikat: {message}",
         pytrace=False,
     )
 
 
-def wait_for_cookie_dialog_or_fail(page: Page) -> Locator:
+def wait_for_initial_page_state(
+    page: Page,
+    timeout_ms: int = 15_000,
+) -> Locator:
     """
     Oczekuje na jeden z dwóch rezultatów:
 
-    1. wyświetlenie panelu ustawień cookies,
-    2. wyświetlenie blokady Imperva/Incapsula.
+    1. pojawienie się panelu ustawień cookies;
+    2. pojawienie się komunikatu blokady Incapsula.
+
+    Zwraca locator panelu cookies, gdy strona została
+    załadowana prawidłowo.
     """
     cookie_dialog = page.get_by_role("dialog")
-    blocked_frame = get_incapsula_frame(page)
+    deadline = time.monotonic() + timeout_ms / 1000
 
-    page_result = cookie_dialog.or_(blocked_frame).first
+    while time.monotonic() < deadline:
+        if cookie_dialog.is_visible():
+            return cookie_dialog
 
-    expect(page_result).to_be_visible(timeout=15_000)
+        incapsula_message = read_incapsula_message(page)
 
-    if blocked_frame.is_visible():
-        fail_with_incapsula_message(blocked_frame)
+        if incapsula_message is not None:
+            fail_when_ing_is_blocked(incapsula_message)
 
-    return cookie_dialog
+        page.wait_for_timeout(250)
+
+    # Ostatnie sprawdzenie po zakończeniu oczekiwania.
+    incapsula_message = read_incapsula_message(page)
+
+    if incapsula_message is not None:
+        fail_when_ing_is_blocked(incapsula_message)
+
+    pytest.fail(
+        "Nie wyświetlono panelu cookies w ciągu "
+        f"{timeout_ms / 1000:.0f} sekund. "
+        "Nie wykryto również komunikatu blokady Incapsula.",
+        pytrace=False,
+    )
 
 
-def fail_if_ing_blocked_after_navigation(
+def check_for_block_after_reload(
     page: Page,
     timeout_ms: int = 3_000,
 ) -> None:
     """
-    Sprawdza po przeładowaniu strony, czy środowisko nie zostało
-    zablokowane przez Imperva/Incapsula.
+    Po przeładowaniu strony sprawdza przez określony czas,
+    czy ING nie zwrócił strony blokady Incapsula.
     """
-    blocked_frame = get_incapsula_frame(page)
+    deadline = time.monotonic() + timeout_ms / 1000
 
-    try:
-        blocked_frame.wait_for(
-            state="visible",
-            timeout=timeout_ms,
-        )
-    except TimeoutError:
-        return
+    while time.monotonic() < deadline:
+        incapsula_message = read_incapsula_message(page)
 
-    fail_with_incapsula_message(blocked_frame)
+        if incapsula_message is not None:
+            fail_when_ing_is_blocked(incapsula_message)
+
+        page.wait_for_timeout(250)
 
 
 @pytest.mark.smoke
-def test_analytics_cookie_consent_is_saved(page: Page) -> None:
+def test_analytics_cookie_consent_is_saved(
+    page: Page,
+) -> None:
     """
-    Sprawdza zapisanie zgody na cookies analityczne oraz
-    brak zgody na cookies marketingowe.
+    Sprawdza zapisanie zgody na cookies analityczne
+    oraz brak zgody na cookies marketingowe.
     """
 
-    # Arrange — test rozpoczyna się bez cookies
-    # pozostawionych przez wcześniejsze uruchomienia.
+    # Arrange — usunięcie cookies pozostałych
+    # po ewentualnych wcześniejszych uruchomieniach.
     page.context.clear_cookies()
 
     page.goto(
@@ -123,7 +165,8 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
         timeout=60_000,
     )
 
-    wait_for_cookie_dialog_or_fail(page)
+    # Oczekiwanie na panel cookies albo wykrycie blokady.
+    wait_for_initial_page_state(page)
 
     cookie_preferences = CookiePreferences(page)
 
@@ -139,10 +182,12 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
         "przed zapisaniem decyzji użytkownika."
     )
 
-    # Act — włączenie wyłącznie cookies analitycznych.
+    # Act — włączenie cookies analitycznych
+    # i zapisanie wybranych ustawień.
     cookie_preferences.accept_analytics_only()
 
-    # Assert — odczyt cookies zapisanych w kontekście przeglądarki.
+    # Assert — odczyt cookies zapisanych
+    # w kontekście przeglądarki.
     cookies_after = get_cookies_by_name(page)
 
     assert CONSENT_COOKIE_NAME in cookies_after, (
@@ -150,21 +195,24 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
     )
 
     assert CONSENT_DETAILS_COOKIE_NAME in cookies_after, (
-        f"Nie zapisano cookie {CONSENT_DETAILS_COOKIE_NAME}."
+        f"Nie zapisano cookie "
+        f"{CONSENT_DETAILS_COOKIE_NAME}."
     )
 
     consent_cookie = cookies_after[CONSENT_COOKIE_NAME]
-    details_cookie = cookies_after[CONSENT_DETAILS_COOKIE_NAME]
+    details_cookie = cookies_after[
+        CONSENT_DETAILS_COOKIE_NAME
+    ]
 
     # Wartość zaobserwowana dla konfiguracji:
     # cookies niezbędne + cookies analityczne.
     assert consent_cookie["value"] == "3", (
         "Cookie zgody ma nieoczekiwaną wartość. "
-        f"Oczekiwano: '3'. "
+        "Oczekiwano: '3'. "
         f"Otrzymano: {consent_cookie['value']!r}."
     )
 
-    # Weryfikacja podstawowych właściwości cookie zgody.
+    # Weryfikacja właściwości cookie zgody.
     assert consent_cookie["domain"].endswith("ing.pl"), (
         "Cookie zgody ma nieprawidłową domenę: "
         f"{consent_cookie['domain']!r}."
@@ -176,10 +224,11 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
     )
 
     assert consent_cookie["expires"] > time.time(), (
-        "Cookie zgody nie ma prawidłowego terminu ważności."
+        "Cookie zgody nie ma prawidłowego "
+        "terminu ważności."
     )
 
-    # Weryfikacja podstawowych właściwości cookie szczegółowego.
+    # Weryfikacja właściwości cookie szczegółowego.
     assert details_cookie["domain"].endswith("ing.pl"), (
         "Cookie szczegółowe ma nieprawidłową domenę: "
         f"{details_cookie['domain']!r}."
@@ -191,16 +240,21 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
     )
 
     assert details_cookie["expires"] > time.time(), (
-        "Cookie szczegółowe nie ma prawidłowego terminu ważności."
+        "Cookie szczegółowe nie ma prawidłowego "
+        "terminu ważności."
     )
 
-    # Weryfikacja JSON zapisanego w cookie szczegółowym.
+    # Weryfikacja JSON zapisanego
+    # w cookie szczegółowym.
     try:
-        details_value = json.loads(details_cookie["value"])
+        details_value = json.loads(
+            details_cookie["value"]
+        )
     except json.JSONDecodeError as error:
         pytest.fail(
             "Cookie cookiePolicyGDPR__details "
-            f"nie zawiera prawidłowego JSON: {error}",
+            "nie zawiera prawidłowego JSON. "
+            f"Szczegóły: {error}",
             pytrace=False,
         )
 
@@ -209,22 +263,26 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
         "'cookieCreateTimestamp'."
     )
 
-    created_at_ms = details_value["cookieCreateTimestamp"]
+    created_at_ms = details_value[
+        "cookieCreateTimestamp"
+    ]
     current_time_ms = int(time.time() * 1000)
 
-    assert isinstance(created_at_ms, int), (
-        "Pole 'cookieCreateTimestamp' nie jest liczbą całkowitą."
+    assert type(created_at_ms) is int, (
+        "Pole 'cookieCreateTimestamp' "
+        "nie jest liczbą całkowitą."
     )
 
     assert abs(current_time_ms - created_at_ms) < 60_000, (
-        "Czas zapisania zgody różni się od czasu wykonania testu "
-        "o więcej niż 60 sekund."
+        "Czas zapisania zgody różni się od czasu "
+        "wykonania testu o więcej niż 60 sekund."
     )
 
-    # Po wyrażeniu wyłącznie zgody analitycznej nie powinny
-    # zostać zapisane cookies marketingowe.
+    # Po wyrażeniu wyłącznie zgody analitycznej
+    # nie powinny zostać zapisane cookies marketingowe.
     unexpected_marketing_cookies = (
-        MARKETING_COOKIE_NAMES & cookies_after.keys()
+        MARKETING_COOKIE_NAMES
+        & cookies_after.keys()
     )
 
     assert not unexpected_marketing_cookies, (
@@ -232,13 +290,14 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
         f"{sorted(unexpected_marketing_cookies)}."
     )
 
-    # Zgoda powinna pozostać zapisana po przeładowaniu strony.
+    # Zgoda powinna pozostać zapisana
+    # po przeładowaniu strony.
     page.reload(
         wait_until="domcontentloaded",
         timeout=60_000,
     )
 
-    fail_if_ing_blocked_after_navigation(page)
+    check_for_block_after_reload(page)
 
     expect(page.get_by_role("dialog")).to_be_hidden(
         timeout=10_000
@@ -247,17 +306,22 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
     cookies_after_reload = get_cookies_by_name(page)
 
     assert CONSENT_COOKIE_NAME in cookies_after_reload, (
-        f"Po przeładowaniu strony brakuje cookie "
+        "Po przeładowaniu strony brakuje cookie "
         f"{CONSENT_COOKIE_NAME}."
     )
 
-    assert CONSENT_DETAILS_COOKIE_NAME in cookies_after_reload, (
-        f"Po przeładowaniu strony brakuje cookie "
+    assert (
+        CONSENT_DETAILS_COOKIE_NAME
+        in cookies_after_reload
+    ), (
+        "Po przeładowaniu strony brakuje cookie "
         f"{CONSENT_DETAILS_COOKIE_NAME}."
     )
 
     assert (
-        cookies_after_reload[CONSENT_COOKIE_NAME]["value"]
+        cookies_after_reload[
+            CONSENT_COOKIE_NAME
+        ]["value"]
         == consent_cookie["value"]
     ), (
         "Po przeładowaniu strony zmieniła się wartość "
@@ -265,7 +329,9 @@ def test_analytics_cookie_consent_is_saved(page: Page) -> None:
     )
 
     assert (
-        cookies_after_reload[CONSENT_DETAILS_COOKIE_NAME]["value"]
+        cookies_after_reload[
+            CONSENT_DETAILS_COOKIE_NAME
+        ]["value"]
         == details_cookie["value"]
     ), (
         "Po przeładowaniu strony zmieniła się wartość "
