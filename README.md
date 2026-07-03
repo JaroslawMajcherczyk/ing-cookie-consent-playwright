@@ -538,7 +538,7 @@ Pipeline znajduje się w pliku:
 .github/workflows/playwright.yml
 ```
 
-Workflow jest uruchamiany:
+Workflow uruchamia się:
 
 - po wykonaniu `push` do gałęzi `main` lub `master`;
 - po utworzeniu `pull_request` do gałęzi `main` lub `master`;
@@ -577,40 +577,50 @@ Każdy job:
 1. pobiera kod repozytorium;
 2. ustawia Python 3.13;
 3. instaluje zależności z `requirements.txt`;
-4. instaluje odpowiednią przeglądarkę i biblioteki systemowe;
+4. instaluje odpowiednią przeglądarkę oraz wymagane biblioteki systemowe;
 5. uruchamia test;
 6. generuje raport JUnit;
 7. publikuje katalog wynikowy jako artefakt GitHub Actions.
 
-### Ograniczenie runnerów GitHub Actions
+### Ograniczenie środowiska GitHub-hosted
 
-Podczas testu na standardowych runnerach GitHub-hosted serwis ING
-może zablokować żądanie przez warstwę bezpieczeństwa
-Imperva/Incapsula.
+Podczas wykonanych prób standardowe runnery GitHub-hosted zostały
+zablokowane przez warstwę bezpieczeństwa Imperva/Incapsula używaną
+przez serwis ING.
 
-W takim przypadku zamiast strony ING zwracany jest komunikat:
+Zamiast właściwej strony zwracany był komunikat:
 
 ```text
 Request unsuccessful. Incapsula incident ID: ...
 ```
 
-Test nie może wtedy rozpocząć interakcji z panelem cookies, ponieważ
-właściwa strona nie została załadowana.
+W takiej sytuacji test kończy się niepowodzeniem przed rozpoczęciem
+interakcji z panelem cookies, ponieważ testowana aplikacja nie została
+załadowana.
 
-Nie jest to błąd locatorów ani konfiguracji Playwright. Jest to
-ograniczenie dostępu do zewnętrznego serwisu z adresów IP używanych
-przez współdzielone runnery GitHub Actions.
+Nie jest to błąd locatorów, kodu testu ani instalacji przeglądarki.
+Jest to ograniczenie dostępu do zewnętrznego serwisu z adresów IP
+używanych przez współdzielone runnery GitHub Actions.
 
-Pipeline potwierdza jednak poprawne działanie:
+Test rozpoznaje tę sytuację i zwraca jednoznaczny komunikat:
+
+```text
+Strona ING nie została załadowana.
+Środowisko testowe zostało zablokowane przez
+warstwę bezpieczeństwa Imperva/Incapsula.
+```
+
+Mimo blokady aplikacji pipeline potwierdza poprawne działanie:
 
 - macierzy trzech przeglądarek;
 - instalacji Chromium, Firefox i WebKit;
 - niezależnego wykonywania jobów;
-- generowania raportów;
+- generowania raportów JUnit;
+- zachowywania trace i screenshotów po błędzie;
 - publikowania artefaktów diagnostycznych.
 
-Testy Chromium i Firefox zostały dodatkowo zweryfikowane lokalnie
-na systemie Manjaro.
+Pełny scenariusz został zweryfikowany lokalnie w oficjalnym
+kontenerze Playwright.
 
 ---
 
@@ -619,19 +629,19 @@ na systemie Manjaro.
 Pełny test Chromium, Firefox i WebKit można uruchomić lokalnie
 w oficjalnym kontenerze Playwright opartym na Ubuntu.
 
-Pozwala to ominąć problem bibliotek WebKit występujący lokalnie
-na niewspieranych dystrybucjach, takich jak Arch Linux lub Manjaro.
+Rozwiązanie pozwala uruchomić WebKit także na systemach, które nie są
+oficjalnie wspierane przez Playwright, takich jak Arch Linux lub Manjaro.
 
 Wersja obrazu Docker musi być zgodna z wersją biblioteki Playwright
 zapisaną w `requirements.txt`.
 
-Dla:
+W projekcie używana jest wersja:
 
 ```text
 playwright==1.61.0
 ```
 
-należy użyć obrazu:
+Dlatego należy użyć obrazu:
 
 ```text
 mcr.microsoft.com/playwright/python:v1.61.0-noble
@@ -658,11 +668,24 @@ docker run --rm --pull=always --ipc=host \
 Znaczenie parametrów:
 
 - `--rm` — usuwa kontener po zakończeniu;
-- `--pull=always` — sprawdza i pobiera aktualny obraz wskazanej wersji;
-- `--ipc=host` — udostępnia przeglądarkom większą przestrzeń pamięci współdzielonej;
+- `--pull=always` — sprawdza i pobiera wskazaną wersję obrazu;
+- `--ipc=host` — udostępnia przeglądarkom pamięć współdzieloną hosta;
 - `-v "$PWD":/work` — udostępnia katalog projektu wewnątrz kontenera;
 - `-w /work` — ustawia katalog roboczy;
 - `-n 3` — uruchamia trzy procesy testowe przez `pytest-xdist`.
+
+Zweryfikowany wynik:
+
+```text
+test_analytics_cookie_consent_is_saved[chromium] PASSED
+test_analytics_cookie_consent_is_saved[firefox] PASSED
+test_analytics_cookie_consent_is_saved[webkit] PASSED
+
+3 passed in 9.89s
+```
+
+Wynik potwierdza poprawne działanie scenariusza w trzech silnikach
+przeglądarek.
 
 Przy zmianie wersji Playwright w `requirements.txt` należy również
 zmienić wersję obrazu Docker.
@@ -705,9 +728,10 @@ się jednocześnie na jednej maszynie GitHub Actions.
 Raport JUnit zawiera między innymi:
 
 - nazwę testu;
-- liczbę uruchomionych testów;
+- liczbę wykonanych testów;
 - liczbę błędów i niepowodzeń;
-- czas wykonania.
+- czas wykonania;
+- komunikat przyczyny niepowodzenia.
 
 Trace i screenshot są zachowywane dzięki parametrom:
 
@@ -734,7 +758,6 @@ Aby pobrać artefakt:
 
 Artefakty są przypisane do konkretnego wykonania workflow. Nie są
 automatycznie dodawane do plików repozytorium.
-
 ---
 
 ## Realizacja wymagań niefunkcjonalnych
