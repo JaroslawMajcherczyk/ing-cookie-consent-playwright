@@ -756,22 +756,6 @@ Aby pobrać artefakt:
 4. przejdź do sekcji **Artifacts**;
 5. pobierz wynik odpowiedniej przeglądarki.
 
-Artefakty są przypisane do konkretnego wykonania workflow. Nie są
-automatycznie dodawane do plików repozytorium.
 ---
 
-## Realizacja wymagań niefunkcjonalnych
-
-| Wymaganie | Sposób realizacji |
-|---|---|
-| Powtarzalny rezultat testu | izolowany kontekst, czyszczenie cookies, ustalone parametry środowiska, automatyczne oczekiwanie i przypięte zależności |
-| Python i Playwright | test zaimplementowany w Pythonie z użyciem `pytest-playwright` |
-| Publikacja na GitHub | kod, historia zmian i wyniki CI są dostępne w repozytorium |
-| Dokumentacja uruchomienia | README zawiera instrukcje dla Linuxa i Windows |
-| Test w kilku przeglądarkach | Chromium, Firefox i WebKit |
-| Jednoczesne wykonanie | lokalnie `pytest-xdist`, w CI macierz GitHub Actions |
-| Diagnostyka błędów | JUnit przy każdym skonfigurowanym uruchomieniu oraz trace i screenshot po niepowodzeniu |
-| Dokumentacja wyników | zrzuty ekranu przechowywane w wersjonowanym katalogu `docs/images/` |
-
----
 
